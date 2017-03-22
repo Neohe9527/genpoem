@@ -1,0 +1,319 @@
+import model
+import numpy as np
+import tensorflow as tf
+import random
+import time
+from gen_dataloader import Gen_Data_loader, Likelihood_data_loader
+from dis_dataloader import Dis_dataloader
+from text_classifier import TextCNN
+from rollout import ROLLOUT
+from target_lstm import TARGET_LSTM
+import cPickle
+import plot_log
+import pickle
+#########################################################################################
+#  Generator  Hyper-parameters
+#########################################################################################
+EMB_DIM = 32
+HIDDEN_DIM = 32
+SEQ_LENGTH = 28
+START_TOKEN = 0
+
+PRE_EPOCH_NUM = 2400
+TRAIN_ITER = 1  # generator
+SEED = 88
+BATCH_SIZE = 16
+##############i############################################################################
+
+TOTAL_BATCH = 3000
+
+#########################################################################################
+#  Discriminator  Hyper-parameters
+#########################################################################################
+dis_embedding_dim = 64
+dis_filter_sizes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20]
+dis_num_filters = [100, 200, 200, 200, 200, 100, 100, 100, 100, 100, 160, 160]
+dis_dropout_keep_prob = 0.75
+dis_l2_reg_lambda = 0.2
+
+# Training parameters
+dis_batch_size = 16
+dis_num_epochs = 3
+dis_alter_epoch = 50
+
+positive_file = '/home/nlp/chenyan/poem/data/poem2id.char.test.1'
+#positive_file='/home/nlp/chenyan/poem/SeqGAN/MLE_SeqGAN/save/real_data.txt'
+negative_file = 'target_generate/generator_sample.txt'
+#eval_file = 'target_generate/eval_file.txt'
+
+generated_num = 150000
+isTrain= True
+
+##############################################################################################
+
+
+class PoemGen(model.LSTM):
+    def g_optimizer(self, *args, **kwargs):
+        return tf.train.AdamOptimizer()  # ignore learning rate
+
+
+def get_trainable_model(num_emb):
+    return PoemGen(num_emb, BATCH_SIZE, EMB_DIM, HIDDEN_DIM, SEQ_LENGTH, START_TOKEN)
+
+
+def generate_samples(sess, trainable_model, batch_size, generated_num, output_file):
+    #  Generated Samples
+    generated_samples = []
+    start = time.time()
+    for _ in range(int(generated_num / batch_size)):
+        generated_samples.extend(trainable_model.generate(sess))
+    end = time.time()
+    #print 'Sample generation time:', (end - start)
+    #with open(output_file, "w") as fout:
+     #   pickle.dump(generated_samples, fout)
+
+    with open(output_file, 'w') as fout:
+        for poem in generated_samples:
+            buffer = ' '.join([str(x) for x in poem]) + '\n'
+           # buffer = u''.join([words[x] for x in poem]).encode('utf-8') + '\n'
+            fout.write(buffer)
+
+
+def target_loss(sess, target_lstm, data_loader):
+    supervised_g_losses = []
+    data_loader.reset_pointer()
+
+    for it in xrange(data_loader.num_batch):
+        batch = data_loader.next_batch()
+        #print batch
+        g_loss = sess.run(target_lstm.pretrain_loss, {target_lstm.x: batch})
+        supervised_g_losses.append(g_loss)
+
+    return np.mean(supervised_g_losses)
+
+
+def significance_test(sess, target_lstm, data_loader, output_file):
+    loss = []
+    data_loader.reset_pointer()
+
+    for it in xrange(data_loader.num_batch):
+        batch = data_loader.next_batch()
+        g_loss = sess.run(target_lstm.out_loss, {target_lstm.x: batch})
+        loss.extend(list(g_loss))
+    with open(output_file, 'w')as fout:
+        for item in loss:
+            buffer = str(item) + '\n'
+            fout.write(buffer)
+
+
+def pre_train_epoch(sess, trainable_model, data_loader):
+    supervised_g_losses = []
+    data_loader.reset_pointer()
+
+    for it in xrange(data_loader.num_batch):
+     #   print data_loader.num_batch
+        batch = data_loader.next_batch()
+       # print batch
+        _, g_loss, g_pred = trainable_model.pretrain_step(sess, batch)
+        supervised_g_losses.append(g_loss)
+
+    return np.mean(supervised_g_losses)
+
+
+def initialize_parameters(inout_dim):
+    result_list = []
+    val = 32
+    layers = [[inout_dim, val],
+               [val, val],
+               [val, val],
+               [1, val],
+
+               [val, val],
+               [val, val],
+               [1, val],
+
+               [val, val],
+               [val, val],
+               [1, val],
+
+               [val, val],
+               [val, val],
+               [1, val],
+
+               [val, inout_dim],
+               [1, inout_dim]]
+    for arr_dim, layer_num in layers:
+         if arr_dim > 1:
+             tmp = np.random.random((arr_dim,layer_num)).astype(np.float32)
+         else:
+              tmp = np.random.random(layer_num,).astype(np.float32)
+         result_list.append(tmp)
+    result = np.array(result_list)
+    return result
+def main():
+    random.seed(SEED)
+    np.random.seed(SEED)
+
+    assert START_TOKEN == 0
+
+    gen_data_loader = Gen_Data_loader(BATCH_SIZE)
+    likelihood_data_loader = Likelihood_data_loader(BATCH_SIZE)
+    vocab_size = 13988+1
+    dis_data_loader = Dis_dataloader()
+
+    best_score = 10000
+    generator = get_trainable_model(vocab_size)
+    target_params = initialize_parameters(vocab_size)
+    target_lstm = TARGET_LSTM(vocab_size, BATCH_SIZE,  EMB_DIM, HIDDEN_DIM, SEQ_LENGTH, START_TOKEN, target_params)
+
+    with tf.variable_scope('discriminator'):
+        cnn = TextCNN(
+            sequence_length=28,
+            num_classes=2,
+            vocab_size=vocab_size,
+            embedding_size=dis_embedding_dim,
+            filter_sizes=dis_filter_sizes,
+            num_filters=dis_num_filters,
+            l2_reg_lambda=dis_l2_reg_lambda)
+
+    cnn_params = [param for param in tf.trainable_variables() if 'discriminator' in param.name]
+    # Define Discriminator Training procedure
+    dis_global_step = tf.Variable(0, name="global_step", trainable=False)
+    dis_optimizer = tf.train.AdamOptimizer(1e-4)
+    dis_grads_and_vars = dis_optimizer.compute_gradients(cnn.loss, cnn_params, aggregation_method=2)
+    dis_train_op = dis_optimizer.apply_gradients(dis_grads_and_vars, global_step=dis_global_step)
+
+    config = tf.ConfigProto()
+    # config.gpu_options.per_process_gpu_memory_fraction = 0.5
+    config.gpu_options.allow_growth = True
+    sess = tf.Session(config=config)
+    sess.run(tf.global_variables_initializer())
+    saver = tf.train.Saver()
+
+    #generate_samples(sess, target_lstm, 64, 10000, positive_file)
+    gen_data_loader.create_batches(positive_file)
+    
+    save_pre_log='log/experiment-log-pre.txt'
+    log_pre = open(save_pre_log, 'w')
+    #  pre-train generator
+    print 'Start pre-training...'
+    #log.write('pre-training...\n')
+    for epoch in xrange(PRE_EPOCH_NUM):
+        print 'pre-train epoch:', epoch
+        loss = pre_train_epoch(sess, generator, gen_data_loader)
+
+        if epoch % 10 == 0:
+            eval_file = 'target_generate/pretrain_epoch'+str(epoch)+'.txt'
+            generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
+            likelihood_data_loader.create_batches(eval_file)
+            test_loss = target_loss(sess, target_lstm, likelihood_data_loader)
+            print 'pre-train epoch ', epoch, 'test_loss ', test_loss
+            buffer = str(epoch) + ',' + str(test_loss) + '\n'
+            log_pre.write(buffer)
+        
+        #if epoch % 50==0 &epoch:
+         #   plot_x, plot_y = plot_log.get_logs(save_pre_log, 1) 
+          #  plt.plot(plot_x, plot_y, label='pre_train')
+           # plt.legend()
+            #plt.savefig('figure/pre/'+str(epoch)+'.png')
+            #checkpoint_file = os.path.join('model_save/', 'model.ckpt')        
+            #saver.save(sess, checkpoint_file, global_step=step)
+    eval_file = 'target_generate/pretrain_finished.txt'
+    generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
+    likelihood_data_loader.create_batches(eval_file)
+    test_loss = target_loss(sess, target_lstm, likelihood_data_loader)
+    buffer = 'After pre-training:' + ' ' + str(test_loss) + '\n'
+    log_pre.write(buffer)
+    log_pre.close()
+    
+    save_after_log='log/experiment-log-aft.txt'
+    log_after=open(save_after_log, 'w')
+    generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
+    likelihood_data_loader.create_batches(eval_file)
+    significance_test(sess, target_lstm, likelihood_data_loader, 'significance/supervise.txt')
+
+    print 'Start training discriminator...'
+    for _ in range(dis_alter_epoch):
+        generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
+
+        #  train discriminator
+        dis_x_train, dis_y_train = dis_data_loader.load_train_data(positive_file, negative_file)
+        dis_batches = dis_data_loader.batch_iter(
+            zip(dis_x_train, dis_y_train), dis_batch_size, dis_num_epochs
+        )
+
+        for batch in dis_batches:
+            try:
+                x_batch, y_batch = zip(*batch)
+                feed = {
+                    cnn.input_x: x_batch,
+                    cnn.input_y: y_batch,
+                    cnn.dropout_keep_prob: dis_dropout_keep_prob
+                }
+                _, step = sess.run([dis_train_op, dis_global_step], feed)
+            except ValueError:
+                pass
+
+    rollout = ROLLOUT(generator, 0.8)
+
+    print '#########################################################################'
+    print 'Start Reinforcement Training Generator...'
+    #log.write('Reinforcement Training...\n')
+
+    for total_batch in range(TOTAL_BATCH):
+        for it in range(TRAIN_ITER):
+            samples = generator.generate(sess)
+            rewards = rollout.get_reward(sess, samples, 16, cnn)
+            feed = {generator.x: samples, generator.rewards: rewards}
+            _, g_loss = sess.run([generator.g_updates, generator.g_loss], feed_dict=feed)
+
+        if total_batch % 1 == 0 or total_batch == TOTAL_BATCH - 1:
+            eval_file='target_generate/reinforce_batch'+str(total_batch)+'txt'
+            generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
+            likelihood_data_loader.create_batches(eval_file)
+            test_loss = target_loss(sess, target_lstm, likelihood_data_loader)
+            buffer = str(total_batch) + ',' + str(test_loss) + '\n'
+            print 'total_batch: ', total_batch, 'test_loss: ', test_loss
+            log_after.write(buffer)
+
+            if test_loss < best_score:
+                best_score = test_loss
+                print 'best score: ', test_loss
+                significance_test(sess, target_lstm, likelihood_data_loader, 'significance/seqgan.txt')
+
+
+        if total_batch%100==0:
+         #   plot_x1, plot_y1 = plot_log.get_logs(save_pre_log, 1)
+          #  plt.plot(plot_x, plot_y, label='Reinforcement_train')
+           # plt.savefig('figure/after/'+str(epoch)+'.png')
+            checkpoint_file = os.path.join('model_save/', 'model.ckpt')
+            saver.save(sess, checkpoint_file, global_step=step)
+
+
+        rollout.update_params()
+
+        # generate for discriminator
+        print 'Start training discriminator'
+        for _ in range(5):
+            generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
+
+            dis_x_train, dis_y_train = dis_data_loader.load_train_data(positive_file, negative_file)
+            dis_batches = dis_data_loader.batch_iter(zip(dis_x_train, dis_y_train), dis_batch_size, 3)
+
+            for batch in dis_batches:
+                try:
+                    x_batch, y_batch = zip(*batch)
+                    feed = {
+                        cnn.input_x: x_batch,
+                        cnn.input_y: y_batch,
+                        cnn.dropout_keep_prob: dis_dropout_keep_prob
+                    }
+                    _, step = sess.run([dis_train_op, dis_global_step], feed)
+                except ValueError:
+                    pass
+
+    log_after.close()
+
+
+if __name__ == '__main__':
+    main()
