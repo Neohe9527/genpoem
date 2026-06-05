@@ -1,6 +1,5 @@
-# Data files
+# Raw data (large, can be re-downloaded)
 key_seq2seq/ppg/data/raw_poetry/
-key_seq2seq/ppg/data/processed/
 
 # Python
 __pycache__/
