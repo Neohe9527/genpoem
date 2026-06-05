@@ -1,0 +1,16 @@
+# Data files
+key_seq2seq/ppg/data/raw_poetry/
+key_seq2seq/ppg/data/processed/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Model checkpoints
+*.pt
+
+# OS
+.DS_Store
