@@ -1,0 +1,4 @@
+torch>=2.0
+pyyaml>=6.0
+jieba>=0.42
+opencc-python-reimplemented>=0.1.7

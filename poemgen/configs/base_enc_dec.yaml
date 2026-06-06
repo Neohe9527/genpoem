@@ -1,0 +1,41 @@
+# 基础实验配置
+experiment:
+  name: base_enc_dec
+  description: "Encoder-Decoder Transformer, 七言绝句, d512"
+
+data:
+  raw_poetry_dir: ../key_seq2seq/ppg/data/raw_poetry
+  processed_dir: data/processed
+  mapping_dir: data/mapping
+  formats: ["7"]  # ["5", "7"] for both
+  max_poems: null  # null = all
+  val_size: 2000
+  test_size: 2000
+
+model:
+  type: encoder_decoder
+  vocab_size: 6000
+  d_model: 512
+  nhead: 8
+  num_encoder_layers: 4
+  num_decoder_layers: 6
+  dim_ff: 1024
+  dropout: 0.15
+  tie_weights: true
+  use_segment: true
+
+training:
+  batch_size: 48
+  max_epochs: 50
+  learning_rate: 5.0e-4
+  warmup_steps: 1000
+  grad_clip: 5.0
+  patience: 7
+  label_smoothing: 0.1
+  device: auto  # auto = mps > cuda > cpu
+
+generation:
+  temperature: 0.75
+  top_p: 0.9
+  repetition_penalty: 1.3
+  use_rhyme_constraint: false

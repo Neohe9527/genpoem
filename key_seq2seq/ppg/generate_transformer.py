@@ -39,12 +39,16 @@ class PoemGenerator:
         self.kw_model.to(self.device).eval()
 
         gen_model_path = os.path.join(config.DATA_DIR, "poem_transformer.pt")
-        self.gen_model = PoemTransformer()
+        self.gen_model = PoemTransformer(
+            d_model=512, nhead=8, num_encoder_layers=4, num_decoder_layers=4,
+            dim_ff=1024, dropout=0.15)
         self.gen_model.load_state_dict(torch.load(gen_model_path, map_location=self.device))
         self.gen_model.to(self.device).eval()
 
     def plan_keywords(self, query):
         keywords = extract_keywords(query, num_keywords=4)
+        if not keywords:
+            keywords = [query[:2]] if len(query) >= 2 else [query]
         if len(keywords) < 4:
             keywords = expand_keywords(
                 keywords, 4, self.kw_model, self.vocab, self.rev_vocab, self.device)

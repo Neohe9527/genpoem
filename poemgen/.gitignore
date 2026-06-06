@@ -1,0 +1,8 @@
+# Processed data (regenerate with: python3 data/preprocess.py)
+data/processed/
+# Experiment outputs
+experiments/
+# OS files
+.DS_Store
+__pycache__/
+*.pyc
